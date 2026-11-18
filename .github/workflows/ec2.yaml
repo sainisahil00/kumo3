@@ -1,284 +1,144 @@
 
-name: Kumo Python CI-CD Pipeline
+name: Python Website - Test, Build, Deploy
 
 on:
   push:
-    branches:
-      - main
-
+    branches: [ main ]
   workflow_dispatch:
 
-permissions:
-  contents: read
+env:
+  APP_DIR: /home/ubuntu/mywebsite
+  APP_PORT: 5000
 
 jobs:
-
-  # ==========================================
-  # STAGE 1: TEST
-  # ==========================================
-
+  # ---------------------------------------------------------------- TEST
   test:
-    name: Test Application
     runs-on: ubuntu-latest
-
     steps:
-
-      - name: Checkout Repository
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
+          python-version: "3.12"
 
-      - name: Check Project Structure
+      - name: Install dependencies
         run: |
-          test -f app.py
-          test -f requirements.txt
-          test -d templates
-          test -d static
-
-          echo "Project structure verified"
-
-      - name: Check Python Syntax
-        run: |
-          python -m compileall -q app.py
-
-          echo "Python syntax verified"
-
-      - name: Install Dependencies
-        run: |
-          python -m venv test-env
-
-          source test-env/bin/activate
-
-          pip install --upgrade pip
-
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install pytest flake8
 
-          echo "Dependencies installed successfully"
+      - name: Lint
+        run: flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
 
+      - name: Run tests
+        run: |
+          if ls tests/ test_*.py *_test.py >/dev/null 2>&1; then
+            pytest
+          else
+            echo "No tests found, skipping"
+          fi
 
-  # ==========================================
-  # STAGE 2: BUILD
-  # ==========================================
-
+  # --------------------------------------------------------------- BUILD
   build:
-    name: Build Application
     runs-on: ubuntu-latest
-
     needs: test
-
     steps:
-
-      - name: Checkout Repository
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Prepare Application
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check that the app compiles
+        run: python -m compileall .
+
+      - name: Package application
         run: |
+          mkdir -p dist
+          tar --exclude='.git' --exclude='.github' --exclude='venv' \
+              --exclude='__pycache__' --exclude='dist' \
+              -czf dist/app.tar.gz .
 
-          mkdir -p build
-
-          cp app.py build/
-
-          cp requirements.txt build/
-
-          cp -r templates build/
-
-          cp -r static build/
-
-          echo "Build completed"
-
-      - name: Upload Build Artifact
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: kumo-build
-          path: build/
-          retention-days: 1
+          name: app-package
+          path: dist/app.tar.gz
 
-
-  # ==========================================
-  # STAGE 3: DEPLOY
-  # ==========================================
-
+  # -------------------------------------------------------------- DEPLOY
   deploy:
-    name: Deploy to Ubuntu EC2
     runs-on: ubuntu-latest
-
     needs: build
-
     steps:
-
-      - name: Download Build Artifact
+      - name: Download build artifact
         uses: actions/download-artifact@v4
         with:
-          name: kumo-build
-          path: build/
+          name: app-package
 
-      # ----------------------------------------
-      # SSH CONFIGURATION
-      # ----------------------------------------
+      - name: Copy package to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: app.tar.gz
+          target: /home/ubuntu/
 
-      - name: Configure SSH
-        env:
-          EC2_KEY: ${{ secrets.EC2_SSH_KEY }}
-          EC2_HOST: ${{ secrets.EC2_HOST }}
-
-        run: |
-
-          mkdir -p ~/.ssh
-
-          printf '%s\n' "$EC2_KEY" > ~/.ssh/id_rsa
-
-          chmod 600 ~/.ssh/id_rsa
-
-          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
-
-      # ----------------------------------------
-      # TRANSFER APPLICATION
-      # ----------------------------------------
-
-      - name: Transfer Application
-        run: |
-
-          tar -czf kumo.tar.gz -C build .
-
-          scp kumo.tar.gz \
-          ubuntu@${{ secrets.EC2_HOST }}:/tmp/kumo.tar.gz
-
-
-      # ----------------------------------------
-      # DEPLOY ON EC2
-      # ----------------------------------------
-
-      - name: Deploy Application
-        run: |
-
-          ssh ubuntu@${{ secrets.EC2_HOST }} << 'EOF'
-
+      - name: Install packages, configure nginx and run app
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          envs: APP_DIR,APP_PORT
+          script_stop: true
+          script: |
             set -e
 
-            echo "Starting Kumo deployment..."
+            # 1. Install system packages
+            sudo apt-get update -y
+            sudo apt-get install -y python3-venv python3-pip nginx
 
-            # 1. Install Python environment
+            # 2. Unpack the app
+            mkdir -p $APP_DIR
+            tar -xzf /home/ubuntu/app.tar.gz -C $APP_DIR
+            rm -f /home/ubuntu/app.tar.gz
+            cd $APP_DIR
 
-            sudo apt-get update
+            # 3. Configure nginx as reverse proxy (port 80 -> app port)
+            sudo tee /etc/nginx/sites-available/mywebsite > /dev/null <<EOF
+            server {
+                listen 80;
+                server_name _;
 
-            sudo apt-get install -y \
-              python3 \
-              python3-venv \
-              python3-pip
+                location / {
+                    proxy_pass http://127.0.0.1:$APP_PORT;
+                    proxy_set_header Host \$host;
+                    proxy_set_header X-Real-IP \$remote_addr;
+                    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                    proxy_set_header X-Forwarded-Proto \$scheme;
+                }
+            }
+            EOF
+            sudo ln -sf /etc/nginx/sites-available/mywebsite /etc/nginx/sites-enabled/mywebsite
+            sudo rm -f /etc/nginx/sites-enabled/default
+            sudo nginx -t
+            sudo systemctl enable nginx
+            sudo systemctl restart nginx
 
-            # 2. Create deployment directories
+            # 4. Create virtual env and install requirements (last install step)
+            python3 -m venv venv
+            source venv/bin/activate
+            pip install --upgrade pip
+            pip install -r requirements.txt
 
-            sudo mkdir -p /var/www/kumo/releases
-
-            sudo chown -R ubuntu:ubuntu /var/www/kumo
-
-            # 3. Create release directory
-
-            RELEASE_ID=$(date +%Y%m%d%H%M%S)
-
-            RELEASE_DIR="/var/www/kumo/releases/$RELEASE_ID"
-
-            mkdir -p "$RELEASE_DIR"
-
-            # 4. Extract application
-
-            tar -xzf /tmp/kumo.tar.gz -C "$RELEASE_DIR"
-
-            # 5. Create Python virtual environment
-
-            python3 -m venv "$RELEASE_DIR/venv"
-
-            # 6. Install Python dependencies
-
-            "$RELEASE_DIR/venv/bin/pip" install --upgrade pip
-
-            "$RELEASE_DIR/venv/bin/pip" install \
-              -r "$RELEASE_DIR/requirements.txt"
-
-            # 7. Set permissions
-
-            sudo chown -R ubuntu:ubuntu "$RELEASE_DIR"
-
-            # 8. Create systemd service
-
-            sudo tee /etc/systemd/system/kumo.service > /dev/null << 'SERVICE'
-
-            [Unit]
-            Description=Kumo Python Cloud Storage Application
-            After=network.target
-
-            [Service]
-            User=ubuntu
-            Group=ubuntu
-            WorkingDirectory=/var/www/kumo/current
-            ExecStart=/var/www/kumo/current/venv/bin/python /var/www/kumo/current/app.py
-            Restart=always
-            RestartSec=5
-
-            [Install]
-            WantedBy=multi-user.target
-
-            SERVICE
-
-            # 9. Save previous release for rollback
-
-            PREVIOUS_RELEASE=$(readlink -f /var/www/kumo/current || true)
-
-            # 10. Activate new release
-
-            ln -sfn "$RELEASE_DIR" /var/www/kumo/current
-
-            # 11. Reload systemd
-
-            sudo systemctl daemon-reload
-
-            # 12. Enable application service
-
-            sudo systemctl enable kumo
-
-            # 13. Restart application
-
-            if ! sudo systemctl restart kumo; then
-
-              echo "Deployment failed. Rolling back..."
-
-              if [ -n "$PREVIOUS_RELEASE" ]; then
-
-                ln -sfn "$PREVIOUS_RELEASE" /var/www/kumo/current
-
-                sudo systemctl restart kumo
-
-              fi
-
-              exit 1
-
-            fi
-
-            # 14. Verify application service
-
+            # 5. Stop old instance, then run the app
+            pkill -f "python3 app.py" || true
+            nohup python3 app.py > app.log 2>&1 &
             sleep 3
-
-            sudo systemctl is-active --quiet kumo
-
-            # 15. Cleanup temporary package
-
-            rm -f /tmp/kumo.tar.gz
-
-            # 16. Keep latest 3 releases
-
-            cd /var/www/kumo/releases
-
-            ls -1dt */ | tail -n +4 | xargs -r rm -rf
-
-            echo "================================"
-
-            echo "KUMO DEPLOYMENT SUCCESSFUL"
-
-            echo "================================"
-
-            sudo systemctl status kumo --no-pager
-
-          EOF
+            echo "App started. Last log lines:"
+            tail -n 10 app.log
