@@ -1,5 +1,5 @@
 ```yaml
-name: Kumo3 Python CI-CD Pipeline
+name: Kumo Python CI-CD Pipeline
 
 on:
   push:
@@ -13,43 +13,44 @@ permissions:
 
 jobs:
 
-  # ==================================
+  # ==========================================
   # STAGE 1: TEST
-  # ==================================
+  # ==========================================
 
   test:
     name: Test Application
     runs-on: ubuntu-latest
 
     steps:
+
       - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.x"
 
-      - name: Check Project Files
+      - name: Check Project Structure
         run: |
           test -f app.py
           test -f requirements.txt
-          test -d static
           test -d templates
+          test -d static
 
-          echo "Project files verified"
+          echo "Project structure verified"
 
-      - name: Python Syntax Test
+      - name: Check Python Syntax
         run: |
           python -m compileall -q app.py
 
-          echo "Python syntax test passed"
+          echo "Python syntax verified"
 
       - name: Install Dependencies
         run: |
-          python -m venv test-venv
+          python -m venv test-env
 
-          source test-venv/bin/activate
+          source test-env/bin/activate
 
           pip install --upgrade pip
 
@@ -58,9 +59,9 @@ jobs:
           echo "Dependencies installed successfully"
 
 
-  # ==================================
+  # ==========================================
   # STAGE 2: BUILD
-  # ==================================
+  # ==========================================
 
   build:
     name: Build Application
@@ -69,32 +70,36 @@ jobs:
     needs: test
 
     steps:
+
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Prepare Build
+      - name: Prepare Application
         run: |
+
           mkdir -p build
 
           cp app.py build/
+
           cp requirements.txt build/
 
-          cp -r static build/
           cp -r templates build/
 
-          echo "Kumo3 build completed"
+          cp -r static build/
+
+          echo "Build completed"
 
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: kumo3-build
+          name: kumo-build
           path: build/
           retention-days: 1
 
 
-  # ==================================
+  # ==========================================
   # STAGE 3: DEPLOY
-  # ==================================
+  # ==========================================
 
   deploy:
     name: Deploy to Ubuntu EC2
@@ -107,18 +112,20 @@ jobs:
       - name: Download Build Artifact
         uses: actions/download-artifact@v4
         with:
-          name: kumo3-build
+          name: kumo-build
           path: build/
 
-      - name: Create Deployment Package
-        run: |
-          tar -czf kumo3.tar.gz -C build .
+      # ----------------------------------------
+      # SSH CONFIGURATION
+      # ----------------------------------------
 
       - name: Configure SSH
         env:
           EC2_KEY: ${{ secrets.EC2_SSH_KEY }}
           EC2_HOST: ${{ secrets.EC2_HOST }}
+
         run: |
+
           mkdir -p ~/.ssh
 
           printf '%s\n' "$EC2_KEY" > ~/.ssh/id_rsa
@@ -127,65 +134,87 @@ jobs:
 
           ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
 
-      - name: Transfer Files to EC2
+      # ----------------------------------------
+      # TRANSFER APPLICATION
+      # ----------------------------------------
+
+      - name: Transfer Application
         run: |
-          scp kumo3.tar.gz \
-          ubuntu@${{ secrets.EC2_HOST }}:/tmp/kumo3.tar.gz
+
+          tar -czf kumo.tar.gz -C build .
+
+          scp kumo.tar.gz \
+          ubuntu@${{ secrets.EC2_HOST }}:/tmp/kumo.tar.gz
+
+
+      # ----------------------------------------
+      # DEPLOY ON EC2
+      # ----------------------------------------
 
       - name: Deploy Application
         run: |
+
           ssh ubuntu@${{ secrets.EC2_HOST }} << 'EOF'
 
             set -e
 
-            echo "Starting Kumo3 deployment..."
+            echo "Starting Kumo deployment..."
 
-            # Install Python environment
-            sudo apt update
+            # 1. Install Python environment
 
-            sudo apt install -y \
+            sudo apt-get update
+
+            sudo apt-get install -y \
               python3 \
               python3-venv \
               python3-pip
 
-            # Create application directory
-            sudo mkdir -p /var/www/kumo3
+            # 2. Create deployment directories
 
-            # Fix directory ownership
-            sudo chown -R ubuntu:ubuntu /var/www/kumo3
+            sudo mkdir -p /var/www/kumo/releases
 
-            # Remove previous virtual environment
-            rm -rf /var/www/kumo3/venv
+            sudo chown -R ubuntu:ubuntu /var/www/kumo
 
-            # Extract application as ubuntu user
-            tar -xzf /tmp/kumo3.tar.gz \
-              -C /var/www/kumo3
+            # 3. Create release directory
 
-            # Set correct ownership
-            sudo chown -R ubuntu:ubuntu /var/www/kumo3
+            RELEASE_ID=$(date +%Y%m%d%H%M%S)
 
-            # Create Python virtual environment
-            python3 -m venv /var/www/kumo3/venv
+            RELEASE_DIR="/var/www/kumo/releases/$RELEASE_ID"
 
-            # Upgrade pip
-            /var/www/kumo3/venv/bin/pip install --upgrade pip
+            mkdir -p "$RELEASE_DIR"
 
-            # Install project dependencies
-            /var/www/kumo3/venv/bin/pip install \
-              -r /var/www/kumo3/requirements.txt
+            # 4. Extract application
 
-            # Create systemd service
-            sudo tee /etc/systemd/system/kumo3.service > /dev/null << 'SERVICE'
+            tar -xzf /tmp/kumo.tar.gz -C "$RELEASE_DIR"
+
+            # 5. Create Python virtual environment
+
+            python3 -m venv "$RELEASE_DIR/venv"
+
+            # 6. Install Python dependencies
+
+            "$RELEASE_DIR/venv/bin/pip" install --upgrade pip
+
+            "$RELEASE_DIR/venv/bin/pip" install \
+              -r "$RELEASE_DIR/requirements.txt"
+
+            # 7. Set permissions
+
+            sudo chown -R ubuntu:ubuntu "$RELEASE_DIR"
+
+            # 8. Create systemd service
+
+            sudo tee /etc/systemd/system/kumo.service > /dev/null << 'SERVICE'
 
             [Unit]
-            Description=Kumo3 Python Cloud Storage Application
+            Description=Kumo Python Cloud Storage Application
             After=network.target
 
             [Service]
             User=ubuntu
             Group=ubuntu
-            WorkingDirectory=/var/www/kumo3
-            ExecStart=/var/www/kumo3/venv/bin/python /var/www/kumo3/app.py
+            WorkingDirectory=/var/www/kumo/current
+            ExecStart=/var/www/kumo/current/venv/bin/python /var/www/kumo/current/app.py
             Restart=always
             RestartSec=5
 
@@ -194,22 +223,63 @@ jobs:
 
             SERVICE
 
-            # Reload systemd
+            # 9. Save previous release for rollback
+
+            PREVIOUS_RELEASE=$(readlink -f /var/www/kumo/current || true)
+
+            # 10. Activate new release
+
+            ln -sfn "$RELEASE_DIR" /var/www/kumo/current
+
+            # 11. Reload systemd
+
             sudo systemctl daemon-reload
 
-            # Enable service
-            sudo systemctl enable kumo3
+            # 12. Enable application service
 
-            # Restart application
-            sudo systemctl restart kumo3
+            sudo systemctl enable kumo
 
-            # Verify service
-            sudo systemctl is-active kumo3
+            # 13. Restart application
 
-            # Cleanup
-            rm -f /tmp/kumo3.tar.gz
+            if ! sudo systemctl restart kumo; then
 
-            echo "Kumo3 deployment successful!"
+              echo "Deployment failed. Rolling back..."
+
+              if [ -n "$PREVIOUS_RELEASE" ]; then
+
+                ln -sfn "$PREVIOUS_RELEASE" /var/www/kumo/current
+
+                sudo systemctl restart kumo
+
+              fi
+
+              exit 1
+
+            fi
+
+            # 14. Verify application service
+
+            sleep 3
+
+            sudo systemctl is-active --quiet kumo
+
+            # 15. Cleanup temporary package
+
+            rm -f /tmp/kumo.tar.gz
+
+            # 16. Keep latest 3 releases
+
+            cd /var/www/kumo/releases
+
+            ls -1dt */ | tail -n +4 | xargs -r rm -rf
+
+            echo "================================"
+
+            echo "KUMO DEPLOYMENT SUCCESSFUL"
+
+            echo "================================"
+
+            sudo systemctl status kumo --no-pager
 
           EOF
 ```
