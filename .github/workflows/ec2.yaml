@@ -1,1 +1,195 @@
+name: Kumo Python CI-CD Pipeline
 
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+
+  # =========================================
+  # STAGE 1: TEST
+  # =========================================
+  test:
+    name: Test Python Application
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check Required Files
+        run: |
+          test -f app.py
+          test -f requirements.txt
+          test -d templates
+          test -d static
+
+          echo "All required files found"
+
+      - name: Check Python Syntax
+        run: |
+          python -m compileall -q app.py
+          echo "Python syntax check passed"
+
+      - name: Install Dependencies and Test
+        run: |
+          python -m venv test-venv
+          source test-venv/bin/activate
+
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+          echo "Dependencies installed successfully"
+
+
+  # =========================================
+  # STAGE 2: BUILD
+  # =========================================
+  build:
+    name: Build Application
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Prepare Build
+        run: |
+          mkdir -p build
+
+          cp app.py build/
+          cp requirements.txt build/
+          cp -r templates build/
+          cp -r static build/
+
+          echo "Application build prepared"
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kumo-build
+          path: build/
+          retention-days: 1
+
+
+  # =========================================
+  # STAGE 3: DEPLOY
+  # =========================================
+  deploy:
+    name: Deploy to Ubuntu EC2
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Download Build Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: kumo-build
+          path: build/
+
+      - name: Package Application
+        run: |
+          tar -czf kumo.tar.gz -C build .
+
+      - name: Configure SSH
+        env:
+          EC2_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+
+          printf '%s\n' "$EC2_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+
+      - name: Copy Package to EC2
+        run: |
+          scp kumo.tar.gz \
+            ubuntu@${{ secrets.EC2_HOST }}:/tmp/kumo.tar.gz
+
+      - name: Deploy Application
+        run: |
+          ssh ubuntu@${{ secrets.EC2_HOST }} << 'EOF'
+
+            set -e
+
+            echo "Starting deployment..."
+
+            # Install required system packages
+            sudo apt update
+            sudo apt install -y python3 python3-venv python3-pip
+
+            # Create application directory
+            sudo mkdir -p /var/www/kumo
+
+            sudo chown ubuntu:ubuntu /var/www/kumo
+
+            # Extract new application
+            sudo tar -xzf /tmp/kumo.tar.gz -C /var/www/kumo
+
+            # Create Python virtual environment
+            python3 -m venv /var/www/kumo/venv
+
+            # Upgrade pip
+            /var/www/kumo/venv/bin/pip install --upgrade pip
+
+            # Install project dependencies
+            /var/www/kumo/venv/bin/pip install \
+              -r /var/www/kumo/requirements.txt
+
+            # Set permissions
+            sudo chown -R ubuntu:ubuntu /var/www/kumo
+
+            # Create systemd service
+            sudo tee /etc/systemd/system/kumo.service > /dev/null << 'SERVICE'
+            [Unit]
+            Description=Kumo Python Cloud Storage Application
+            After=network.target
+
+            [Service]
+            User=ubuntu
+            Group=ubuntu
+            WorkingDirectory=/var/www/kumo
+            ExecStart=/var/www/kumo/venv/bin/python /var/www/kumo/app.py
+            Restart=always
+            RestartSec=5
+
+            [Install]
+            WantedBy=multi-user.target
+            SERVICE
+
+            # Reload systemd
+            sudo systemctl daemon-reload
+
+            # Enable service on boot
+            sudo systemctl enable kumo
+
+            # Restart application
+            sudo systemctl restart kumo
+
+            # Check service status
+            sudo systemctl is-active kumo
+
+            # Cleanup
+            rm -f /tmp/kumo.tar.gz
+
+            echo "Deployment completed successfully"
+
+          EOF
