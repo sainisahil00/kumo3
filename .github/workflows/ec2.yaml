@@ -98,7 +98,7 @@ jobs:
           APP_PORT: "5000"   # change if app.py runs on another port
         with:
           host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}        # ubuntu
+          username: ubuntu                         # default user on Ubuntu AMIs
           key: ${{ secrets.EC2_SSH_KEY }}          # contents of your .pem file
           envs: GH_TOKEN,REPO,APP_DIR,APP_PORT
           script_stop: true
