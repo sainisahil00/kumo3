@@ -1,4 +1,4 @@
-```yaml
+
 name: Kumo Python CI-CD Pipeline
 
 on:
@@ -282,4 +282,3 @@ jobs:
             sudo systemctl status kumo --no-pager
 
           EOF
-```
