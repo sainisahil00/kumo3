@@ -12,7 +12,7 @@ pip install -r requirements.txt
 python app.py
 ```
 
-Open http://127.0.0.1:5000, create an account, and start dropping files in.
+Open http://0.0.0.0:5000, create an account, and start dropping files in.
 
 ## What it does
 
@@ -33,7 +33,7 @@ Open http://127.0.0.1:5000, create an account, and start dropping files in.
 | --- | --- | --- |
 | `KUMO_QUOTA_MB` | 1024 | Storage per user |
 | `KUMO_MAX_UPLOAD_MB` | 512 | Largest single file |
-| `KUMO_HOST` / `KUMO_PORT` | 127.0.0.1 / 5000 | Where it listens |
+| `KUMO_HOST` / `KUMO_PORT` | 0.0.0.0 / 5000 | Where it listens |
 | `KUMO_DEBUG` | off | Set to `1` for Flask debug mode |
 
 ## Where things live
