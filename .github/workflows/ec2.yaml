@@ -1,97 +1,96 @@
-
-name: Python Website - Test, Build, Deploy
+name: Test, Build & Deploy to EC2
 
 on:
   push:
-    branches: [ main ]
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
   workflow_dispatch:
 
-env:
-  APP_DIR: /home/ubuntu/mywebsite
-  APP_PORT: 5000
-
 jobs:
-  # ---------------------------------------------------------------- TEST
+  # ---------- 1. TEST ----------
   test:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
+          python -m venv venv
+          source venv/bin/activate
+          pip install --upgrade pip
           pip install -r requirements.txt
           pip install pytest flake8
 
-      - name: Lint
-        run: flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+      - name: Lint (syntax errors / undefined names)
+        run: |
+          source venv/bin/activate
+          flake8 . --exclude venv --count --select=E9,F63,F7,F82 --show-source --statistics
 
       - name: Run tests
         run: |
-          if ls tests/ test_*.py *_test.py >/dev/null 2>&1; then
-            pytest
+          source venv/bin/activate
+          if [ -d tests ] || ls test_*.py >/dev/null 2>&1; then
+            pytest -v
           else
-            echo "No tests found, skipping"
+            echo "No tests found - running smoke test on app.py"
+            python -c "from app import app; c = app.test_client(); r = c.get('/'); print('GET / ->', r.status_code); assert r.status_code == 200"
           fi
 
-  # --------------------------------------------------------------- BUILD
+  # ---------- 2. BUILD ----------
   build:
-    runs-on: ubuntu-latest
     needs: test
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Check that the app compiles
-        run: python -m compileall .
+      - name: Verify app compiles
+        run: python -m compileall -q .
 
-      - name: Package application
+      - name: Package build artifact
         run: |
-          mkdir -p dist
-          tar --exclude='.git' --exclude='.github' --exclude='venv' \
-              --exclude='__pycache__' --exclude='dist' \
-              -czf dist/app.tar.gz .
+          tar --exclude=venv --exclude=.git --exclude=__pycache__ \
+              -czf app-build.tar.gz app.py requirements.txt static templates
 
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: app-package
-          path: dist/app.tar.gz
+          name: app-build
+          path: app-build.tar.gz
+          retention-days: 7
 
-  # -------------------------------------------------------------- DEPLOY
+  # ---------- 3. DEPLOY ----------
   deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - name: Deploy over SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.EC2_HOST }}          # EC2 public IP / DNS
-          username: ${{ secrets.EC2_USER }}      # ubuntu
-          key: ${{ secrets.EC2_SSH_KEY }}        # contents of your .pem file
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
           envs: GH_TOKEN,REPO
           script_stop: true
           script: |
             set -e
-
             APP_DIR=/home/ubuntu/app
 
-            # 1. Install apache2, python venv, git
+            # Install server packages
             sudo apt-get update -y
             sudo apt-get install -y apache2 git python3 python3-pip python3-venv
             sudo systemctl enable --now apache2
 
-            # 2. Clone repo (or pull if it already exists)
+            # Clone or update repo
             if [ -d "$APP_DIR/.git" ]; then
               cd $APP_DIR
               git pull origin main
@@ -100,22 +99,18 @@ jobs:
               cd $APP_DIR
             fi
 
-            # 3. Create venv inside the project folder
-            if [ ! -d "venv" ]; then
-              python3 -m venv venv
-            fi
-
-            # 4. Activate venv and install requirements
+            # venv inside project folder
+            [ -d venv ] || python3 -m venv venv
             source venv/bin/activate
             pip install --upgrade pip
             pip install -r requirements.txt
 
-            # 5. Stop old process, start app.py
+            # Restart app
             pkill -f "python3 app.py" || true
             nohup python3 app.py > app.log 2>&1 &
             disown
             sleep 3
-            echo "App started"
+            echo "Deployed and started"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
