@@ -654,6 +654,6 @@ def shared_file(token):
 init_db()
 
 if __name__ == "__main__":
-    app.run(host=os.environ.get("KUMO_HOST", "127.0.0.1"),
+    app.run(host=os.environ.get("KUMO_HOST", "0.0.0.0"),
             port=int(os.environ.get("KUMO_PORT", 5000)),
             debug=os.environ.get("KUMO_DEBUG") == "1")
